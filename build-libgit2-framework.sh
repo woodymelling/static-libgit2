@@ -3,7 +3,26 @@
 export REPO_ROOT=`pwd`
 export DEPENDENCIES_ROOT="$REPO_ROOT/dependencies"
 
+OPENSSL_VERSION=3.0.0
+LIBSSH2_VERSION=1.11.1
+LIBGIT2_VERSION=1.9.4
+MACOS_DEPLOYMENT_TARGET=12.4
+
 set -e
+
+function download_file() {
+    local URL=$1
+    local OUTPUT=$2
+
+    if command -v curl >/dev/null 2>/dev/null; then
+        curl -L "$URL" -o "$OUTPUT"
+    elif command -v wget >/dev/null 2>/dev/null; then
+        wget -q "$URL" -O "$OUTPUT"
+    else
+        echo "curl or wget is required to download $URL"
+        exit 1
+    fi
+}
 
 rm -rf $DEPENDENCIES_ROOT
 mkdir $DEPENDENCIES_ROOT
@@ -35,7 +54,7 @@ function setup_variables() {
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER_WORKS=ON \
         -DCMAKE_CXX_COMPILER_WORKS=ON \
-        -DCMAKE_OSX_DEPLOYMENT_TARGET=12.4 \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET \
         -DCMAKE_INSTALL_PREFIX=$REPO_ROOT/$2/$PLATFORM)
 
     case $PLATFORM in
@@ -100,10 +119,10 @@ function build_openssl() {
     setup_variables $1 install-openssl
 
     # It is better to remove and redownload the source since building make the source code directory dirty!
-    rm -rf openssl-3.0.0
-    test -f openssl-3.0.0.tar.gz || wget -q https://www.openssl.org/source/openssl-3.0.0.tar.gz
-    tar xzf openssl-3.0.0.tar.gz
-    cd openssl-3.0.0
+    rm -rf openssl-$OPENSSL_VERSION
+    test -f openssl-$OPENSSL_VERSION.tar.gz || download_file https://www.openssl.org/source/openssl-$OPENSSL_VERSION.tar.gz openssl-$OPENSSL_VERSION.tar.gz
+    tar xzf openssl-$OPENSSL_VERSION.tar.gz
+    cd openssl-$OPENSSL_VERSION
 
     case $PLATFORM in
         "iphoneos")
@@ -120,7 +139,7 @@ function build_openssl() {
 
         "macosx"|"macosx-arm64")
             TARGET_OS=darwin64-$ARCH-cc
-            export CFLAGS="-isysroot $SYSROOT";;
+            export CFLAGS="-isysroot $SYSROOT -mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET";;
 
         *)
             echo "Unsupported or missing platform!";;
@@ -142,10 +161,10 @@ function build_openssl() {
 function build_libssh2() {
     setup_variables $1 install-libssh2
 
-    rm -rf libssh2-1.10.0
-    test -f libssh2-1.10.0.tar.gz || wget -q https://www.libssh2.org/download/libssh2-1.10.0.tar.gz
-    tar xzf libssh2-1.10.0.tar.gz
-    cd libssh2-1.10.0
+    rm -rf libssh2-$LIBSSH2_VERSION
+    test -f libssh2-$LIBSSH2_VERSION.tar.gz || download_file https://www.libssh2.org/download/libssh2-$LIBSSH2_VERSION.tar.gz libssh2-$LIBSSH2_VERSION.tar.gz
+    tar xzf libssh2-$LIBSSH2_VERSION.tar.gz
+    cd libssh2-$LIBSSH2_VERSION
 
     rm -rf build && mkdir build && cd build
 
@@ -165,19 +184,28 @@ function build_libssh2() {
 function build_libgit2() {
     setup_variables $1 install
 
-    rm -rf libgit2-1.3.0
-    test -f v1.3.0.zip || wget -q https://github.com/libgit2/libgit2/archive/refs/tags/v1.3.0.zip
-    ditto -x -k --sequesterRsrc --rsrc v1.3.0.zip ./
-    cd libgit2-1.3.0
+    rm -rf libgit2-$LIBGIT2_VERSION
+    test -f v$LIBGIT2_VERSION.zip || download_file https://github.com/libgit2/libgit2/archive/refs/tags/v$LIBGIT2_VERSION.zip v$LIBGIT2_VERSION.zip
+    ditto -x -k --sequesterRsrc --rsrc v$LIBGIT2_VERSION.zip ./
+    cd libgit2-$LIBGIT2_VERSION
 
     rm -rf build && mkdir build && cd build
 
     # The CMake function that determines if `libssh2_userauth_publickey_frommemory` is defined doesn't
-    # work when everything is statically linked. Manually override GIT_SSH_MEMORY_CREDENTIALS.
-    CMAKE_ARGS+=(-DBUILD_CLAR=NO -DGIT_SSH_MEMORY_CREDENTIALS=1 -DCMAKE_PREFIX_PATH="$REPO_ROOT/install-libssh2/$PLATFORM;$REPO_ROOT/install-openssl/$PLATFORM")
+    # work when everything is statically linked. Manually override HAVE_LIBSSH2_MEMORY_CREDENTIALS.
+    CMAKE_ARGS+=(-DBUILD_TESTS=OFF \
+        -DBUILD_CLI=OFF \
+        -DUSE_SSH=libssh2 \
+        -DHAVE_LIBSSH2_MEMORY_CREDENTIALS=1 \
+        -DLIBSSH2_INCLUDE_DIR=$REPO_ROOT/install-libssh2/$PLATFORM/include \
+        -DLIBSSH2_LIBRARY=$REPO_ROOT/install-libssh2/$PLATFORM/lib/libssh2.a \
+        -DCMAKE_PREFIX_PATH="$REPO_ROOT/install-libssh2/$PLATFORM;$REPO_ROOT/install-openssl/$PLATFORM")
 
     echo "cmake ${CMAKE_ARGS[@]} .."
     cmake "${CMAKE_ARGS[@]}" ..
+    grep -q "#define GIT_SSH 1" gen_headers/git2_features.h
+    grep -q "#define GIT_SSH_LIBSSH2 1" gen_headers/git2_features.h
+    grep -q "#define GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS 1" gen_headers/git2_features.h
 
     cmake --build . --target install >/dev/null 2>/dev/null
 }
